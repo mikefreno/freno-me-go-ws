@@ -43,7 +43,7 @@ var db *sql.DB
 func createDBConnection() *sql.DB {
 	err := godotenv.Load()
 	if err != nil {
-		log.Fatal("Error loading .env file")
+		log.Printf("Error loading .env file")
 	}
 
 	db, err := sql.Open("mysql", os.Getenv("DSN"))
@@ -157,5 +157,15 @@ func main() {
 	db = createDBConnection()
 	defer db.Close()
 	setupRoutes()
-	log.Fatal(http.ListenAndServe(":8080", nil))
+
+	err := godotenv.Load()
+	if err != nil {
+		log.Printf("Error loading .env file")
+	}
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080" // Default port if not specified
+	}
+	log.Fatal(http.ListenAndServe(":"+port, nil))
+
 }

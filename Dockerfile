@@ -1,14 +1,26 @@
-FROM golang:1.16 as builder
 
+# syntax=docker/dockerfile:1
+
+# Intermediate build container
+FROM golang:1.21 AS builder
+
+# Set destination for COPY
 WORKDIR /app
 
-COPY go.* ./
+COPY go.mod go.sum ./
 RUN go mod download
 
-COPY . ./
+COPY *.go ./
 
-RUN CGO_ENABLED=0 GOOS=linux go build -v -o server
+RUN CGO_ENABLED=0 GOOS=linux go build -o /app/docker-gs-ping
 
-FROM gcr.io/distroless/base-debian10
-COPY --from=builder /app/server /server
-CMD ["/server"]
+# Final production container
+FROM alpine:latest
+
+# Copy built binary from builder container
+COPY --from=builder /app/docker-gs-ping /docker-gs-ping
+
+EXPOSE 8080
+
+CMD ["/docker-gs-ping"]
+

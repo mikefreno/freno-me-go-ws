@@ -17,17 +17,18 @@ import (
 type Data struct {
 	Action          string  `json:"action"`
 	PostType        string  `json:"postType"`
-	BlogID          *int    `json:"blog_id"`
-	ProjectID       *int    `json:"project_id"`
+	PostID          *int    `json:"post_id"`
 	InvokerID       string  `json:"invoker_id"`
 	CommentBody     *string `json:"comment_body"`
-	CommentType     *string `json:"comment_type"`
 	ParentCommentID *int    `json:"parent_comment_id"`
+	CommentID       *int    `json:"comment_id"`
 }
 
 type Client struct {
-	ID   string
-	Conn *websocket.Conn
+	ID          string
+	Conn        *websocket.Conn
+	ChannelID   *int
+	ChannelType *string
 }
 
 var clients = make(map[string]*Client)
@@ -57,36 +58,126 @@ func createDBConnection() *sql.DB {
 	return db
 }
 
-func channelUpdate(data Data, connID string) {
-	query := `INSERT INTO Connection (user_id, connection_id) VALUES(?, ?)`
-	params := []interface{}{data.InvokerID, connID}
-	_, err := db.Exec(query, params...)
-	if err != nil {
-		log.Printf("Failed to execute query: %v", err)
-		return
+func getAllConnectionsInChannel(post_id int, post_type string) []*Client {
+	lock.RLock()
+	defer lock.RUnlock()
+	var clientsInChannel []*Client
+	for _, client := range clients {
+		if client.ChannelID != nil && client.ChannelType != nil &&
+			*client.ChannelID == post_id && *client.ChannelType == post_type {
+			clientsInChannel = append(clientsInChannel, client)
+		}
+	}
+	return clientsInChannel
+}
+
+func broadcast(message []byte, clients []*Client) {
+	for _, client := range clients {
+		err := client.Conn.WriteMessage(websocket.TextMessage, message)
+		if err != nil {
+			fmt.Println("write error:", err)
+			client.Conn.Close()
+		}
 	}
 }
+func channelUpdate(data Data, client *Client) {
+	lock.Lock()
+	defer lock.Unlock()
+
+	client, exists := clients[client.ID]
+	if exists {
+		client.ChannelType = &data.PostType
+		client.ChannelID = data.PostID
+	}
+}
+
 func commentCreation(data Data) {
-	query := `INSERT INTO Comment (body, blog_id, project_id, parent_comment_id, commenter_id) VALUES (?, ?, ?, ?, ?)`
+	query := fmt.Sprintf(`INSERT INTO Comment (body, %s, parent_comment_id, commenter_id) VALUES (?, ?, ?, ?)`, (data.PostType + "_id"))
 	params := []interface{}{
 		data.CommentBody,
-		data.BlogID,
-		data.ProjectID,
+		data.PostID,
 		data.ParentCommentID,
 		data.InvokerID,
 	}
+	res, err := db.Exec(query, params...)
+	if err != nil {
+		log.Printf("Failed to execute query: %v", err)
+		return
+	}
+	commentID, err := res.LastInsertId()
+	if err != nil {
+		log.Printf("Failed to retrieve ID: %v", err)
+		return
+	}
+	broadcastTargets := getAllConnectionsInChannel(*data.PostID, data.PostType)
+	jsonMsg, err := json.Marshal(&struct {
+		CommentID   int64  `json:"comment_id"`
+		CommentBody string `json:"comment_body"`
+	}{
+		CommentID:   *&commentID,
+		CommentBody: *data.CommentBody,
+	})
+
+	if err != nil {
+		log.Printf("Failed to create JSON message: %v", err)
+		return
+	}
+	broadcast(jsonMsg, broadcastTargets)
+}
+func commentUpdate(data Data) {
+	const query = `UPDATE Comment SET body = ? WHERE id = ?`
+	params := []interface{}{
+		data.CommentBody,
+		data.CommentID,
+	}
 	_, err := db.Exec(query, params...)
 	if err != nil {
 		log.Printf("Failed to execute query: %v", err)
 		return
 	}
+	broadcastTargets := getAllConnectionsInChannel(*data.PostID, data.PostType)
+	jsonMsg, err := json.Marshal(&struct {
+		CommentID   int    `json:"comment_id"`
+		CommentBody string `json:"comment_body"`
+	}{
+		CommentID:   *data.CommentID,
+		CommentBody: *data.CommentBody,
+	})
 
+	if err != nil {
+		log.Printf("Failed to create JSON message: %v", err)
+		return
+	}
+	broadcast(jsonMsg, broadcastTargets)
 }
-func commentUpdate(data Data) {
 
-}
 func commentDeletion(data Data) {
+	const query = `UPDATE Comment SET body = ?, commenter_id = ? WHERE id = ?`
+	deletionBody := "[comment removed by user]"
+	params := []interface{}{
+		deletionBody,
+		0,
+		data.CommentID,
+	}
+	_, err := db.Exec(query, params...)
+	if err != nil {
+		log.Printf("Failed to execute query: %v", err)
+		return
+	}
+	broadcastTargets := getAllConnectionsInChannel(*data.PostID, data.PostType)
+	jsonMsg, err := json.Marshal(&struct {
+		CommentID   int    `json:"comment_id"`
+		CommentBody string `json:"comment_body"`
+	}{
+		CommentID:   *data.CommentID,
+		CommentBody: deletionBody,
+	})
 
+	if err != nil {
+		log.Printf("Failed to create JSON message: %v", err)
+		return
+	}
+	broadcast(jsonMsg, broadcastTargets)
 }
 
 func reader(client *Client) {
@@ -112,7 +203,7 @@ func reader(client *Client) {
 		log.Println(data.Action)
 		switch data.Action {
 		case "channelUpdate":
-			channelUpdate(data, client.ID)
+			channelUpdate(data, client)
 		case "commentCreation":
 			commentCreation(data)
 		case "commentUpdate":

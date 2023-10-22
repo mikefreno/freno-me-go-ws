@@ -192,18 +192,30 @@ func commentUpdate(data Data) {
 
 func commentDeletion(data Data) {
 	if *data.DeleteType == "user" || (*data.DeleteType == "admin" && data.InvokerID == os.Getenv("ADMIN_ID")) {
-		const query = `UPDATE Comment SET body = ?, commenter_id = ? WHERE id = ?`
+		var params []interface{}
+		var query string
 		deletionBody := fmt.Sprintf("[comment removed by %s]", *data.DeleteType)
-		params := []interface{}{
-			deletionBody,
-			0,
-			data.CommentID,
+
+		if *data.DeleteType == "user" {
+			query = `UPDATE Comment SET body = ? WHERE id = ?`
+			params = []interface{}{
+				deletionBody,
+				data.CommentID,
+			}
+		} else {
+			query = `UPDATE Comment SET body = ?, commenter_id = ? WHERE id = ?`
+			params = []interface{}{
+				deletionBody,
+				0,
+				data.CommentID,
+			}
 		}
 		_, err := db.Exec(query, params...)
 		if err != nil {
 			log.Printf("Failed to execute query: %v", err)
 			return
 		}
+
 		broadcastTargets := getAllConnectionsInChannel(*data.PostID, data.PostType)
 		jsonMsg, err := json.Marshal(&struct {
 			Action      string `json:"action"`

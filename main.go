@@ -162,9 +162,10 @@ func commentCreation(data Data) {
 }
 
 func commentUpdate(data Data) {
-	const query = `UPDATE Comment SET body = ? WHERE id = ?`
+	const query = `UPDATE Comment SET body = ?, edited = ? WHERE id = ?`
 	params := []interface{}{
 		data.CommentBody,
+		true,
 		data.CommentID,
 	}
 	_, err := db.Exec(query, params...)
@@ -197,15 +198,17 @@ func commentDeletion(data Data) {
 		deletionBody := fmt.Sprintf("[comment removed by %s]", *data.DeleteType)
 
 		if *data.DeleteType == "user" {
-			query = `UPDATE Comment SET body = ? WHERE id = ?`
+			query = `UPDATE Comment SET body = ?, edited = ? WHERE id = ?`
 			params = []interface{}{
 				deletionBody,
+				false,
 				data.CommentID,
 			}
 		} else {
-			query = `UPDATE Comment SET body = ?, commenter_id = ? WHERE id = ?`
+			query = `UPDATE Comment SET body = ?, edited = ?, commenter_id = ? WHERE id = ?`
 			params = []interface{}{
 				deletionBody,
+				false,
 				0,
 				data.CommentID,
 			}

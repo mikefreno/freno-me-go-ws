@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 )
 
@@ -23,6 +24,7 @@ type Data struct {
 	CommentBody     *string `json:"commentBody"`
 	ParentCommentID *int    `json:"parentCommentID"`
 	CommentID       *int    `json:"commentID"`
+	Reaction        *string `json:"reactionType"`
 }
 
 type Client struct {
@@ -236,7 +238,7 @@ func commentDeletion(data Data) {
 		}
 		broadcast(jsonMsg, broadcastTargets)
 	} else if *data.DeleteType == "full" {
-		const query = `DELETE FROM Comment WHERE id = ?`
+		query := `DELETE FROM Comment WHERE id = ?`
 		_, err := db.Exec(query, data.CommentID)
 		if err != nil {
 			log.Printf("Failed to execute query %v", err)
@@ -256,6 +258,239 @@ func commentDeletion(data Data) {
 		}
 		broadcast(jsonMsg, broadcastTargets)
 	}
+}
+
+func commentReaction(data Data) {
+	if *data.Reaction == "upVote" || *data.Reaction == "downVote" {
+		commentPoints(data)
+	} else {
+		//first delete
+		deleteQuery := `DELETE FROM CommentReaction WHERE type = ? AND comment_id = ? AND user_id = ?`
+		params := []interface{}{
+			*data.Reaction,
+			*data.CommentID,
+			data.InvokerID,
+		}
+		res, err := db.Exec(deleteQuery, params...)
+		if err != nil {
+			log.Printf("Failed to execute query: %v", err)
+			return
+		}
+		affectedRows, err := res.RowsAffected()
+		if err != nil {
+			log.Printf("Failed to get affected row count: %v", err)
+			return
+		}
+		var endEffect = "deletion"
+		if affectedRows == 0 {
+			insertQuery := `INSERT INTO CommentReaction (type, comment_id, user_id) VALUES (?, ?, ?)`
+			_, err := db.Exec(insertQuery, params...)
+			if err != nil {
+				log.Printf("Failed to get affected row count: %v", err)
+				return
+			}
+			endEffect = "creation"
+		}
+		broadcastTargets := getAllConnectionsInChannel(*data.PostID, data.PostType)
+		jsonMsg, err := json.Marshal(&struct {
+			Action         string `json:"action"`
+			ReactionType   string `json:"reactionType"`
+			EndEffect      string `json:"endEffect"`
+			ReactingUserID string `json:"reactingUserID"`
+			CommentID      int    `json:"commentID"`
+		}{
+			Action:         "commentReactionBroadcast",
+			ReactionType:   *data.Reaction,
+			EndEffect:      endEffect,
+			ReactingUserID: data.InvokerID,
+			CommentID:      *data.CommentID,
+		})
+		if err != nil {
+			log.Printf("Failed to create JSON message: %v", err)
+			return
+		}
+		broadcast(jsonMsg, broadcastTargets)
+	}
+}
+
+func commentPoints(data Data) {
+	deleteQuery := `DELETE FROM CommentReaction WHERE type = ? AND comment_id = ? AND user_id = ?`
+	insertQuery := `INSERT INTO CommentReaction (type, comment_id, user_id) VALUES (?, ?, ?)`
+	upVoteParams := []interface{}{
+		"upVote",
+		data.CommentID,
+		data.InvokerID,
+	}
+	downVoteParams := []interface{}{
+		"downVote",
+		data.CommentID,
+		data.InvokerID,
+	}
+	localBroadcaster := func(endEffect string) {
+		broadcastTargets := getAllConnectionsInChannel(*data.PostID, data.PostType)
+		jsonMsg, err := json.Marshal(&struct {
+			Action         string `json:"action"`
+			ReactionType   string `json:"reactionType"`
+			EndEffect      string `json:"endEffect"`
+			ReactingUserID string `json:"reactingUserID"`
+			CommentID      int    `json:"commentID"`
+		}{
+			Action:         "commentReactionBroadcast",
+			ReactionType:   *data.Reaction,
+			EndEffect:      endEffect,
+			ReactingUserID: data.InvokerID,
+			CommentID:      *data.CommentID,
+		})
+		if err != nil {
+			log.Printf("Failed to create JSON message: %v", err)
+			return
+		}
+		broadcast(jsonMsg, broadcastTargets)
+	}
+
+	if *data.Reaction == "upVote" {
+		//start with delete upVote, if a deletion was done, all good, broadcast it
+		//if not, delete a downVote (may or may not exist), and create an upVote. broadcast
+		res, err := db.Exec(deleteQuery, upVoteParams...)
+		if err != nil {
+			log.Printf("Failed to execute query: %v", err)
+			return
+		}
+		affectedRows, err := res.RowsAffected()
+		if err != nil {
+			log.Printf("Failed to get affected row count: %v", err)
+			return
+		}
+		if affectedRows == 0 {
+			//delete downVote
+			_, deleteErr := db.Exec(deleteQuery, downVoteParams...)
+			if deleteErr != nil {
+				log.Printf("Failed to execute query: %v", err)
+				return
+			}
+			affectedRows, err := res.RowsAffected()
+			if err != nil {
+				log.Printf("Failed to get affected row count: %v", err)
+				return
+			}
+			_, createErr := db.Exec(insertQuery, upVoteParams...)
+			if createErr != nil {
+				log.Printf("Failed to execute query: %v", err)
+				return
+			}
+			endEffect := "inversion"
+			if affectedRows == 0 {
+				endEffect = "creation"
+			}
+			localBroadcaster(endEffect)
+
+		} else {
+			//user already had upVote given, and reclicked upVote button (return to neutral)
+			localBroadcaster("deletion")
+		}
+	} else if *data.Reaction == "downVote" {
+		//repeat same as above, but with downVote type
+		res, err := db.Exec(deleteQuery, downVoteParams...)
+		if err != nil {
+			log.Printf("Failed to execute query: %v", err)
+			return
+		}
+		affectedRows, err := res.RowsAffected()
+		if err != nil {
+			log.Printf("Failed to get affected row count: %v", err)
+			return
+		}
+		if affectedRows == 0 {
+			_, deleteErr := db.Exec(deleteQuery, upVoteParams...)
+			if deleteErr != nil {
+				log.Printf("Failed to execute query: %v", err)
+				return
+			}
+			affectedRows, err := res.RowsAffected()
+			if err != nil {
+				log.Printf("Failed to get affected row count: %v", err)
+				return
+			}
+			_, createErr := db.Exec(insertQuery, downVoteParams...)
+			if createErr != nil {
+				log.Printf("Failed to execute query: %v", err)
+				return
+			}
+			endEffect := "inversion"
+			if affectedRows == 0 {
+				endEffect = "creation"
+			}
+			localBroadcaster(endEffect)
+		} else {
+			//user already had downVote given, and reclicked downVote button (return to neutral)
+			localBroadcaster("deletion")
+		}
+	}
+}
+
+func postLike(data Data) {
+	alreadyLikedCheckQuery := fmt.Sprintf(`DELETE FROM %sLike WHERE user_id = ?, AND %s_id = ?`, strings.Title(data.PostType), data.PostType)
+	params := []interface{}{
+		data.InvokerID,
+		data.PostID,
+	}
+	res, err := db.Exec(alreadyLikedCheckQuery, params...)
+	if err != nil {
+		log.Printf("Failed to execute query: %v", err)
+		return
+	}
+	affectedRows, err := res.RowsAffected()
+	if err != nil {
+		log.Printf("Failed to get affected row count: %v", err)
+		return
+	}
+	if affectedRows == 0 {
+		//add new postLike
+		query := fmt.Sprintf(`INSERT INTO %sLike (user_id, %s_id) VALUES (?, ?)`, strings.Title(data.PostType), data.PostType)
+		params := []interface{}{
+			data.InvokerID,
+			data.PostID,
+		}
+		_, err := db.Exec(query, params...)
+		if err != nil {
+			log.Printf("Failed to execute query: %v", err)
+			return
+		}
+		//broadcast increment
+		broadcastTargets := getAllConnectionsInChannel(*data.PostID, data.PostType)
+		jsonMsg, err := json.Marshal(&struct {
+			Action  string `json:"action"`
+			LikerID string `json:"likerID"`
+			Change  int    `json:"change"`
+		}{
+			Action:  "postLikeBroadcast",
+			LikerID: data.InvokerID,
+			Change:  1,
+		})
+		if err != nil {
+			log.Printf("Failed to create JSON message: %v", err)
+			return
+		}
+		broadcast(jsonMsg, broadcastTargets)
+	} else {
+		//broadcast decrement
+		broadcastTargets := getAllConnectionsInChannel(*data.PostID, data.PostType)
+		jsonMsg, err := json.Marshal(&struct {
+			Action  string `json:"action"`
+			LikerID string `json:"likerID"`
+			Change  int    `json:"change"`
+		}{
+			Action:  "postLikeBroadcast",
+			LikerID: data.InvokerID,
+			Change:  -1,
+		})
+		if err != nil {
+			log.Printf("Failed to create JSON message: %v", err)
+			return
+		}
+		broadcast(jsonMsg, broadcastTargets)
+	}
+
 }
 
 func reader(client *Client) {
@@ -279,6 +514,7 @@ func reader(client *Client) {
 		}
 
 		log.Println(data.Action)
+
 		switch data.Action {
 		case "channelUpdate":
 			channelUpdate(data, client)
@@ -288,6 +524,10 @@ func reader(client *Client) {
 			commentUpdate(data)
 		case "commentDeletion":
 			commentDeletion(data)
+		case "commentReaction":
+			commentReaction(data)
+		case "postLike":
+			postLike(data)
 		default:
 			log.Printf("Unrecognized action: %s", data.Action)
 		}

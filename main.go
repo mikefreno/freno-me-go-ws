@@ -318,12 +318,12 @@ func commentPoints(data Data) {
 	insertQuery := `INSERT INTO CommentReaction (type, comment_id, user_id) VALUES (?, ?, ?)`
 	upVoteParams := []interface{}{
 		"upVote",
-		data.CommentID,
+		*data.CommentID,
 		data.InvokerID,
 	}
 	downVoteParams := []interface{}{
 		"downVote",
-		data.CommentID,
+		*data.CommentID,
 		data.InvokerID,
 	}
 	localBroadcaster := func(endEffect string) {
@@ -353,7 +353,7 @@ func commentPoints(data Data) {
 		//if not, delete a downVote (may or may not exist), and create an upVote. broadcast
 		res, err := db.Exec(deleteQuery, upVoteParams...)
 		if err != nil {
-			log.Printf("Failed to execute query: %v", err)
+			log.Printf("Failed to execute query 0: %v", err)
 			return
 		}
 		affectedRows, err := res.RowsAffected()
@@ -363,19 +363,19 @@ func commentPoints(data Data) {
 		}
 		if affectedRows == 0 {
 			//delete downVote
-			_, deleteErr := db.Exec(deleteQuery, downVoteParams...)
+			res2, deleteErr := db.Exec(deleteQuery, downVoteParams...)
 			if deleteErr != nil {
-				log.Printf("Failed to execute query: %v", err)
+				log.Printf("Failed to execute query 1: %v", err)
 				return
 			}
-			affectedRows, err := res.RowsAffected()
+			affectedRows, err := res2.RowsAffected()
 			if err != nil {
 				log.Printf("Failed to get affected row count: %v", err)
 				return
 			}
 			_, createErr := db.Exec(insertQuery, upVoteParams...)
 			if createErr != nil {
-				log.Printf("Failed to execute query: %v", err)
+				log.Printf("Failed to execute query 2: %v", createErr)
 				return
 			}
 			endEffect := "inversion"
@@ -392,7 +392,7 @@ func commentPoints(data Data) {
 		//repeat same as above, but with downVote type
 		res, err := db.Exec(deleteQuery, downVoteParams...)
 		if err != nil {
-			log.Printf("Failed to execute query: %v", err)
+			log.Printf("Failed to execute query 3: %v", err)
 			return
 		}
 		affectedRows, err := res.RowsAffected()
@@ -401,19 +401,19 @@ func commentPoints(data Data) {
 			return
 		}
 		if affectedRows == 0 {
-			_, deleteErr := db.Exec(deleteQuery, upVoteParams...)
+			res2, deleteErr := db.Exec(deleteQuery, upVoteParams...)
 			if deleteErr != nil {
-				log.Printf("Failed to execute query: %v", err)
+				log.Printf("Failed to execute query 4: %v", deleteErr)
 				return
 			}
-			affectedRows, err := res.RowsAffected()
+			affectedRows, err := res2.RowsAffected()
 			if err != nil {
 				log.Printf("Failed to get affected row count: %v", err)
 				return
 			}
 			_, createErr := db.Exec(insertQuery, downVoteParams...)
 			if createErr != nil {
-				log.Printf("Failed to execute query: %v", err)
+				log.Printf("Failed to execute query 5: %v", createErr)
 				return
 			}
 			endEffect := "inversion"
